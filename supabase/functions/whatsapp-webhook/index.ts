@@ -303,7 +303,7 @@ serve(async (req) => {
         .from("whatsapp_messages")
         .select("id")
         .eq("user_id", profile.id)
-        .eq("phone", normalizedPhone)
+        .eq("phone", phone)
         .eq("direction", "incoming")
         .eq("message_type", "audio")
         .eq("content", audioUrl)
@@ -312,7 +312,7 @@ serve(async (req) => {
         .maybeSingle();
 
       if (duplicateAudio) {
-        console.log("Duplicate audio webhook ignored:", { phone: normalizedPhone, audioUrl, duplicateId: duplicateAudio.id });
+        console.log("Duplicate audio webhook ignored:", { phone, audioUrl, duplicateId: duplicateAudio.id });
         return new Response(JSON.stringify({ success: true, deduplicated: true }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
@@ -324,7 +324,7 @@ serve(async (req) => {
       .from("whatsapp_messages")
       .insert({
         user_id: profile.id,
-        phone: normalizedPhone,
+        phone,
         direction: "incoming",
         message_type: isAudio ? "audio" : "text",
         content: isAudio ? audioUrl : messageContent,
