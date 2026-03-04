@@ -36,6 +36,13 @@ serve(async (req) => {
       body = JSON.parse(rawBody);
     } catch {
       console.error("Failed to parse webhook body");
+      await supabase.from("whatsapp_audit_events").insert({
+        reason: "invalid_json",
+        event: "unknown",
+        phone: null,
+        payload: { raw: rawBody.slice(0, 20000), invalid_json: true },
+        details: { note: "Webhook body não pôde ser parseado" },
+      });
       return new Response(JSON.stringify({ error: "Invalid JSON" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
