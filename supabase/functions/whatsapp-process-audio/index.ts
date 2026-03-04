@@ -632,6 +632,44 @@ Sempre responda APENAS com o JSON, sem markdown.`;
       console.log("Merged register_device:", JSON.stringify(interpretedAction));
     }
 
+    // SELF-HEALING: para cadastro, recalcule campos faltantes com base no que já foi extraído + contexto pendente + transcrição
+    const shouldRepairRegisterDevice =
+      interpretedAction.action === "register_device" ||
+      (interpretedAction.action === "need_info" &&
+        ((interpretedAction.partial_action || pendingContext?.partial_action) === "register_device"));
+
+    if (shouldRepairRegisterDevice) {
+      const repaired = coerceRegisterDevicePayload(interpretedAction, pendingContext, combinedTranscription);
+      const recalculatedMissing = requiredFieldsByAction.register_device.filter(
+        (field) => !isFieldPresent(repaired[field])
+      );
+
+      if (recalculatedMissing.length === 0) {
+        interpretedAction = {
+          action: "register_device",
+          ...repaired,
+        };
+      } else {
+        interpretedAction = {
+          action: "need_info",
+          partial_action: "register_device",
+          missing_fields: recalculatedMissing,
+          ...repaired,
+        };
+      }
+
+      console.log("Repaired register_device interpretation:", JSON.stringify({
+        action: interpretedAction.action,
+        missing_fields: interpretedAction.missing_fields || [],
+        modelo: interpretedAction.modelo,
+        capacidade: interpretedAction.capacidade,
+        cor: interpretedAction.cor,
+        condicao: interpretedAction.condicao,
+        preco_custo: interpretedAction.preco_custo,
+        preco_venda: interpretedAction.preco_venda,
+      }));
+    }
+
     // Execute action
     let actionResult: any = { success: false };
     let replyMessage = "";
