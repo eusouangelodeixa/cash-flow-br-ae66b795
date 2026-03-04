@@ -157,15 +157,33 @@ serve(async (req) => {
       }
     }
 
-    // Check if user is verified
-    const { data: profile } = await supabase
+    // Check if user is verified - try exact variants first
+    let profile: any = null;
+    const { data: profileData } = await supabase
       .from("profiles")
       .select("id, nome, whatsapp")
-      .in("whatsapp", phoneVariants)
+      .in("whatsapp", phoneVariantsArray)
       .eq("whatsapp_verified", true)
-      .single();
+      .limit(1)
+      .maybeSingle();
+    
+    profile = profileData;
 
-    console.log("Profile lookup:", { phoneVariants, found: !!profile });
+    // Fallback: try matching by phone suffix (last 9+ digits)
+    if (!profile && normalizedPhone.length >= 9) {
+      const phoneSuffix = normalizedPhone.slice(-9);
+      const { data: fallbackProfile } = await supabase
+        .from("profiles")
+        .select("id, nome, whatsapp")
+        .eq("whatsapp_verified", true)
+        .like("whatsapp", `%${phoneSuffix}`)
+        .limit(1)
+        .maybeSingle();
+      profile = fallbackProfile;
+      if (profile) console.log("Profile found via suffix fallback:", profile.whatsapp);
+    }
+
+    console.log("Profile lookup:", { phoneVariantsArray, found: !!profile, profileWhatsapp: profile?.whatsapp });
 
     if (!profile) {
       if (uazapiUrl && uazapiToken) {
