@@ -195,7 +195,7 @@ serve(async (req) => {
     console.log("Phone variants for lookup:", phoneVariantsArray);
 
     // Skip messages sent by the API itself
-    if (data?.fromMe === true || data?.wasSentByApi === true) {
+    if (data?.fromMe === true || data?.key?.fromMe === true || body?.fromMe === true || data?.wasSentByApi === true) {
       console.log("Skipping own message");
       return new Response(
         JSON.stringify({ success: true, message: "Own message - skipping" }),
