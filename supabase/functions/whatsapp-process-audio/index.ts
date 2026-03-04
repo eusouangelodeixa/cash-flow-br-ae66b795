@@ -675,6 +675,9 @@ Sempre responda APENAS com o JSON, sem markdown.`;
     let replyMessage = "";
 
     if (interpretedAction.action === "register_device") {
+      const normalizedCondicao = normalizeDeviceCondition(interpretedAction.condicao, combinedTranscription);
+      interpretedAction.condicao = normalizedCondicao || interpretedAction.condicao;
+
       const missingFields = requiredFieldsByAction.register_device.filter((field) => !isFieldPresent(interpretedAction[field]));
       if (missingFields.length > 0) {
         const need = buildAllQuestionsMessage("register_device", missingFields, interpretedAction, combinedTranscription);
@@ -682,16 +685,13 @@ Sempre responda APENAS com o JSON, sem markdown.`;
         actionResult = need.actionResult;
         replyMessage = need.replyMessage;
       } else {
-        const condicaoValida = ["novo_lacrado", "usado_a", "usado_b", "para_pecas"];
-        const condicao = condicaoValida.includes(interpretedAction.condicao) ? interpretedAction.condicao : "usado_a";
-
         const { error } = await supabase.from("devices").insert({
           user_id: profile.id,
           modelo: interpretedAction.modelo,
           capacidade: interpretedAction.capacidade,
           cor: interpretedAction.cor,
           cor_hex: "#000000",
-          condicao,
+          condicao: normalizedCondicao,
           preco_custo: interpretedAction.preco_custo,
           preco_venda: interpretedAction.preco_venda || null,
           notas: interpretedAction.notas || "Cadastrado via WhatsApp",
