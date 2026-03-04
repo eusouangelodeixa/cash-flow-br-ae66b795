@@ -98,18 +98,24 @@ serve(async (req) => {
     console.log("Message type:", { messageType, isAudio, isText, hasContent: !!messageContent, hasAudioUrl: !!audioUrl });
 
     const normalizedPhone = phone.replace(/\D/g, "");
-    // Also try with/without country code
-    const phoneVariants = [
+    // Generate phone variants: exact, without common country codes, with 55 prefix
+    const phoneVariants = new Set([
       normalizedPhone,
       normalizedPhone.replace(/^55/, ""),
       `55${normalizedPhone.replace(/^55/, "")}`,
-    ];
+      // Also try stripping other common country codes
+      normalizedPhone.replace(/^258/, ""),
+      normalizedPhone.replace(/^351/, ""),
+      normalizedPhone.replace(/^1/, ""),
+    ]);
+    const phoneVariantsArray = Array.from(phoneVariants).filter(p => p.length >= 8);
+    console.log("Phone variants for lookup:", phoneVariantsArray);
 
     // Check if user is in verification flow
     const { data: pendingVerification } = await supabase
       .from("whatsapp_verifications")
       .select("*")
-      .in("phone", phoneVariants)
+      .in("phone", phoneVariantsArray)
       .eq("verified", false)
       .gt("expires_at", new Date().toISOString())
       .order("created_at", { ascending: false })
@@ -151,15 +157,33 @@ serve(async (req) => {
       }
     }
 
-    // Check if user is verified
-    const { data: profile } = await supabase
+    // Check if user is verified - try exact variants first
+    let profile: any = null;
+    const { data: profileData } = await supabase
       .from("profiles")
       .select("id, nome, whatsapp")
-      .in("whatsapp", phoneVariants)
+      .in("whatsapp", phoneVariantsArray)
       .eq("whatsapp_verified", true)
-      .single();
+      .limit(1)
+      .maybeSingle();
+    
+    profile = profileData;
 
-    console.log("Profile lookup:", { phoneVariants, found: !!profile });
+    // Fallback: try matching by phone suffix (last 9+ digits)
+    if (!profile && normalizedPhone.length >= 9) {
+      const phoneSuffix = normalizedPhone.slice(-9);
+      const { data: fallbackProfile } = await supabase
+        .from("profiles")
+        .select("id, nome, whatsapp")
+        .eq("whatsapp_verified", true)
+        .like("whatsapp", `%${phoneSuffix}`)
+        .limit(1)
+        .maybeSingle();
+      profile = fallbackProfile;
+      if (profile) console.log("Profile found via suffix fallback:", profile.whatsapp);
+    }
+
+    console.log("Profile lookup:", { phoneVariantsArray, found: !!profile, profileWhatsapp: profile?.whatsapp });
 
     if (!profile) {
       if (uazapiUrl && uazapiToken) {
