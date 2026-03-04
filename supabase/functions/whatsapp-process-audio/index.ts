@@ -37,6 +37,114 @@ const isFieldPresent = (val: any) => {
   return true;
 };
 
+const parsePositiveNumber = (value: unknown): number | null => {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+
+  if (typeof value !== "string") return null;
+
+  const cleaned = value.replace(/[^\d.,-]/g, "").trim();
+  if (!cleaned) return null;
+
+  let normalizedNumber = cleaned;
+
+  if (/^\d{1,3}(\.\d{3})+$/.test(cleaned)) {
+    normalizedNumber = cleaned.replace(/\./g, "");
+  } else if (cleaned.includes(".") && cleaned.includes(",")) {
+    normalizedNumber = cleaned.replace(/\./g, "").replace(",", ".");
+  } else if (cleaned.includes(",")) {
+    normalizedNumber = cleaned.replace(",", ".");
+  }
+
+  const parsed = Number(normalizedNumber);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const normalizeDeviceCapacity = (value: unknown, fallbackText = ""): string => {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return `${Math.round(value)}GB`;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const capacityMatch = trimmed.match(/(\d{2,4})\s*gb/i);
+    if (capacityMatch?.[1]) return `${capacityMatch[1]}GB`;
+
+    if (/^\d{2,4}$/.test(trimmed)) return `${trimmed}GB`;
+    if (trimmed) return trimmed;
+  }
+
+  const textMatch = String(fallbackText || "").match(/(\d{2,4})\s*gb/i);
+  return textMatch?.[1] ? `${textMatch[1]}GB` : "";
+};
+
+const normalizeDeviceCondition = (value: unknown, fallbackText = ""): string => {
+  const combined = normalize(`${String(value || "")} ${String(fallbackText || "")}`);
+  if (!combined) return "";
+
+  if (combined.includes("para_pecas") || combined.includes("para pecas") || combined.includes("pecas") || combined.includes("peca")) {
+    return "para_pecas";
+  }
+  if (combined.includes("usado_b") || combined.includes("usado b") || combined.includes("grau b")) {
+    return "usado_b";
+  }
+  if (combined.includes("usado_a") || combined.includes("usado a") || combined.includes("seminovo") || combined.includes("semi novo")) {
+    return "usado_a";
+  }
+  if (combined.includes("novo_lacrado") || combined.includes("novo") || combined.includes("lacrado") || combined.includes("selado")) {
+    return "novo_lacrado";
+  }
+
+  return "";
+};
+
+const extractPriceFromTranscription = (text: string, kind: "custo" | "venda"): number | null => {
+  const normalizedText = normalize(text || "");
+
+  const patterns = kind === "custo"
+    ? [
+        /(?:preco de compra|preco compra|custo|compra|paguei)\D{0,18}([\d.,]+)/i,
+      ]
+    : [
+        /(?:preco de venda|valor de venda|vendas?|vendo|por)\D{0,18}([\d.,]+)/i,
+      ];
+
+  for (const pattern of patterns) {
+    const match = normalizedText.match(pattern);
+    if (!match?.[1]) continue;
+
+    const parsed = parsePositiveNumber(match[1]);
+    if (parsed) return parsed;
+  }
+
+  return null;
+};
+
+const coerceRegisterDevicePayload = (baseAction: any, pendingContext: any, transcriptionText: string) => {
+  const merged = {
+    ...(pendingContext?.collected_data || {}),
+    ...(baseAction || {}),
+  };
+
+  const modelo = typeof merged.modelo === "string" ? merged.modelo.trim() : "";
+  const capacidade = normalizeDeviceCapacity(merged.capacidade, transcriptionText);
+  const cor = typeof merged.cor === "string" ? merged.cor.trim() : "";
+  const condicao = normalizeDeviceCondition(merged.condicao, transcriptionText);
+  const preco_custo = parsePositiveNumber(merged.preco_custo) ?? extractPriceFromTranscription(transcriptionText, "custo");
+  const preco_venda = parsePositiveNumber(merged.preco_venda) ?? extractPriceFromTranscription(transcriptionText, "venda");
+
+  return {
+    ...merged,
+    modelo,
+    capacidade,
+    cor,
+    condicao,
+    preco_custo: preco_custo ?? null,
+    preco_venda: preco_venda ?? null,
+  };
+};
+
 const buildAllQuestionsMessage = (partialAction: string, missingFields: string[], collectedData: any, originalTranscription?: string) => {
   const questions = missingFields.map((f, i) => `${i + 1}. ${fieldLabels[f] || f}`).join("\n");
   const actionLabel = partialAction === "register_sale" ? "registrar a venda" : "cadastrar o aparelho";
@@ -524,11 +632,53 @@ Sempre responda APENAS com o JSON, sem markdown.`;
       console.log("Merged register_device:", JSON.stringify(interpretedAction));
     }
 
+    // SELF-HEALING: para cadastro, recalcule campos faltantes com base no que já foi extraído + contexto pendente + transcrição
+    const shouldRepairRegisterDevice =
+      interpretedAction.action === "register_device" ||
+      (interpretedAction.action === "need_info" &&
+        ((interpretedAction.partial_action || pendingContext?.partial_action) === "register_device"));
+
+    if (shouldRepairRegisterDevice) {
+      const repaired = coerceRegisterDevicePayload(interpretedAction, pendingContext, combinedTranscription);
+      const recalculatedMissing = requiredFieldsByAction.register_device.filter(
+        (field) => !isFieldPresent(repaired[field])
+      );
+
+      if (recalculatedMissing.length === 0) {
+        const { missing_fields, partial_action, question, ...cleaned } = repaired;
+        interpretedAction = {
+          ...cleaned,
+          action: "register_device",
+        };
+      } else {
+        interpretedAction = {
+          ...repaired,
+          action: "need_info",
+          partial_action: "register_device",
+          missing_fields: recalculatedMissing,
+        };
+      }
+
+      console.log("Repaired register_device interpretation:", JSON.stringify({
+        action: interpretedAction.action,
+        missing_fields: interpretedAction.missing_fields || [],
+        modelo: interpretedAction.modelo,
+        capacidade: interpretedAction.capacidade,
+        cor: interpretedAction.cor,
+        condicao: interpretedAction.condicao,
+        preco_custo: interpretedAction.preco_custo,
+        preco_venda: interpretedAction.preco_venda,
+      }));
+    }
+
     // Execute action
     let actionResult: any = { success: false };
     let replyMessage = "";
 
     if (interpretedAction.action === "register_device") {
+      const normalizedCondicao = normalizeDeviceCondition(interpretedAction.condicao, combinedTranscription);
+      interpretedAction.condicao = normalizedCondicao;
+
       const missingFields = requiredFieldsByAction.register_device.filter((field) => !isFieldPresent(interpretedAction[field]));
       if (missingFields.length > 0) {
         const need = buildAllQuestionsMessage("register_device", missingFields, interpretedAction, combinedTranscription);
@@ -536,16 +686,13 @@ Sempre responda APENAS com o JSON, sem markdown.`;
         actionResult = need.actionResult;
         replyMessage = need.replyMessage;
       } else {
-        const condicaoValida = ["novo_lacrado", "usado_a", "usado_b", "para_pecas"];
-        const condicao = condicaoValida.includes(interpretedAction.condicao) ? interpretedAction.condicao : "usado_a";
-
         const { error } = await supabase.from("devices").insert({
           user_id: profile.id,
           modelo: interpretedAction.modelo,
           capacidade: interpretedAction.capacidade,
           cor: interpretedAction.cor,
           cor_hex: "#000000",
-          condicao,
+          condicao: normalizedCondicao,
           preco_custo: interpretedAction.preco_custo,
           preco_venda: interpretedAction.preco_venda || null,
           notas: interpretedAction.notas || "Cadastrado via WhatsApp",
@@ -653,14 +800,12 @@ Sempre responda APENAS com o JSON, sem markdown.`;
         }
       }
     } else if (interpretedAction.action === "need_info") {
-      const partialAction = interpretedAction.partial_action || "register_sale";
-      const missingFields = Array.isArray(interpretedAction.missing_fields) && interpretedAction.missing_fields.length > 0
-        ? interpretedAction.missing_fields
-        : requiredFieldsByAction[partialAction] || ["modelo"];
+      const partialAction = interpretedAction.partial_action || pendingContext?.partial_action || "register_sale";
+      const requiredFields = requiredFieldsByAction[partialAction] || ["modelo"];
 
       // Merge any data GPT already extracted
       const collectedData: Record<string, any> = {};
-      const allFields = [...(requiredFieldsByAction[partialAction] || []), "device_id", "modelo", "capacidade", "cor", "condicao", "preco_custo", "preco_venda", "cliente"];
+      const allFields = [...requiredFields, "device_id", "modelo", "capacidade", "cor", "condicao", "preco_custo", "preco_venda", "cliente"];
       for (const f of allFields) {
         if (isFieldPresent(interpretedAction[f])) collectedData[f] = interpretedAction[f];
       }
@@ -669,6 +814,16 @@ Sempre responda APENAS com o JSON, sem markdown.`;
         for (const [k, v] of Object.entries(pendingContext.collected_data)) {
           if (!collectedData[k] && isFieldPresent(v)) collectedData[k] = v;
         }
+      }
+
+      let missingFields = Array.isArray(interpretedAction.missing_fields) && interpretedAction.missing_fields.length > 0
+        ? interpretedAction.missing_fields
+        : requiredFields;
+
+      if (partialAction === "register_device") {
+        const repaired = coerceRegisterDevicePayload(collectedData, pendingContext, combinedTranscription);
+        Object.assign(collectedData, repaired);
+        missingFields = requiredFieldsByAction.register_device.filter((field) => !isFieldPresent(collectedData[field]));
       }
 
       const need = buildAllQuestionsMessage(partialAction, missingFields, collectedData, combinedTranscription);
