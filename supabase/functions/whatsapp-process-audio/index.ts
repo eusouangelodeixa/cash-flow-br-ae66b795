@@ -233,20 +233,90 @@ serve(async (req) => {
       console.log("Transcription:", transcription);
     }
 
-    // Find user by phone
-    const normalizedPhone = phone.replace(/\D/g, "");
-    const phoneVariants = [
-      normalizedPhone,
-      normalizedPhone.replace(/^55/, ""),
-      `55${normalizedPhone.replace(/^55/, "")}`,
-    ];
+    // Find user reliably (message log -> phone variants)
+    const normalizePhone = (value: unknown): string => String(value || "").replace(/\D/g, "");
 
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("id, nome, whatsapp")
-      .in("whatsapp", phoneVariants)
-      .eq("whatsapp_verified", true)
-      .single();
+    const buildPhoneVariants = (phoneDigits: string): string[] => {
+      if (!phoneDigits) return [];
+      const variants = new Set<string>([phoneDigits]);
+
+      for (let i = 1; i <= 3; i++) {
+        if (phoneDigits.length > i + 6) variants.add(phoneDigits.slice(i));
+      }
+
+      [8, 9, 10, 11, 12].forEach((len) => {
+        if (phoneDigits.length >= len) variants.add(phoneDigits.slice(-len));
+      });
+
+      return Array.from(variants).filter((p) => p.length >= 8 && p.length <= 15);
+    };
+
+    const normalizedIncomingPhone = normalizePhone(phone);
+    const phoneLookupVariants = new Set<string>(buildPhoneVariants(normalizedIncomingPhone));
+
+    let profile: any = null;
+
+    // 1) Prefer user_id already persisted by webhook
+    if (messageId) {
+      const { data: msg } = await supabase
+        .from("whatsapp_messages")
+        .select("user_id, phone")
+        .eq("id", messageId)
+        .maybeSingle();
+
+      const msgPhone = normalizePhone(msg?.phone);
+      buildPhoneVariants(msgPhone).forEach((v) => phoneLookupVariants.add(v));
+
+      if (msg?.user_id) {
+        const { data: profileByMessageUser } = await supabase
+          .from("profiles")
+          .select("id, nome, whatsapp")
+          .eq("id", msg.user_id)
+          .eq("whatsapp_verified", true)
+          .maybeSingle();
+
+        profile = profileByMessageUser;
+      }
+    }
+
+    // 2) Fallback by exact/variant phone match
+    if (!profile) {
+      const { data: profileByPhone } = await supabase
+        .from("profiles")
+        .select("id, nome, whatsapp")
+        .in("whatsapp", Array.from(phoneLookupVariants))
+        .eq("whatsapp_verified", true)
+        .limit(1)
+        .maybeSingle();
+
+      profile = profileByPhone;
+    }
+
+    // 3) Fallback by suffix matching for international formats
+    if (!profile) {
+      const suffixes = Array.from(phoneLookupVariants)
+        .filter((p) => p.length >= 9)
+        .map((p) => p.slice(-9));
+
+      for (const suffix of new Set(suffixes)) {
+        const { data: fallbackProfile } = await supabase
+          .from("profiles")
+          .select("id, nome, whatsapp")
+          .eq("whatsapp_verified", true)
+          .like("whatsapp", `%${suffix}`)
+          .limit(1)
+          .maybeSingle();
+
+        if (fallbackProfile) {
+          profile = fallbackProfile;
+          break;
+        }
+      }
+    }
+
+    // Keep canonical variants for subsequent context queries
+    buildPhoneVariants(normalizePhone(profile?.whatsapp)).forEach((v) => phoneLookupVariants.add(v));
+    const phoneVariants = Array.from(phoneLookupVariants);
 
     if (!profile) {
       if (messageId) {
