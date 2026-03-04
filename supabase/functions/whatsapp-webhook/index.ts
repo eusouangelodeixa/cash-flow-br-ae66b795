@@ -311,7 +311,7 @@ serve(async (req) => {
     console.log("Profile lookup:", { phoneVariantsArray, found: !!profile, profileWhatsapp: profile?.whatsapp });
 
     if (!profile) {
-      const inboundLooksUserMessage = isAudio || isText || !!messageContent || !!audioUrl;
+      const inboundLooksUserMessage = isAudio || isText || hasTextContent || !!audioUrl;
 
       // Ambiguous payloads should not trigger false "vincule seu número"
       if (!hasTrustedCandidate || !inboundLooksUserMessage) {
@@ -320,6 +320,14 @@ serve(async (req) => {
           inboundLooksUserMessage,
           selectedSource: selectedCandidate?.source,
         });
+        await auditUnrecognized("unrecognized_ambiguous_payload", {
+          hasTrustedCandidate,
+          inboundLooksUserMessage,
+          selected_source: selectedCandidate?.source || null,
+          message_type: messageType,
+          has_audio_url: !!audioUrl,
+          has_text_content: hasTextContent,
+        }, phone);
         return new Response(JSON.stringify({ success: true, reason: "ambiguous_phone_payload" }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
@@ -331,6 +339,11 @@ serve(async (req) => {
           selectedSource: selectedCandidate?.source,
           phone,
         });
+        await auditUnrecognized("audio_unmatched_profile", {
+          selected_source: selectedCandidate?.source || null,
+          message_type: messageType,
+          has_audio_url: !!audioUrl,
+        }, phone);
         return new Response(JSON.stringify({ success: true, reason: "audio_unmatched_profile" }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
@@ -341,6 +354,10 @@ serve(async (req) => {
           "👋 Olá! Para usar o assistente por WhatsApp, primeiro vincule seu número no app CashFlow na seção Perfil."
         );
       }
+      await auditUnrecognized("not_verified_text_auto_reply", {
+        selected_source: selectedCandidate?.source || null,
+        message_type: messageType,
+      }, phone);
       return new Response(JSON.stringify({ success: false, reason: "not_verified" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
