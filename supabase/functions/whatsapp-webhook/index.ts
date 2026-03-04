@@ -182,7 +182,8 @@ serve(async (req) => {
 
     const audioUrl = data?.content?.URL || data?.content?.url ||
                      data?.audioUrl || data?.mediaUrl || data?.url ||
-                     data?.audioMessage?.url || body?.mediaUrl || "";
+                     data?.audioMessage?.url || data?.message?.audioMessage?.url ||
+                     body?.mediaUrl || body?.audioMessage?.url || body?.message?.audioMessage?.url || "";
 
     console.log("Message type:", { messageType, isAudio, isText, hasContent: !!messageContent, hasAudioUrl: !!audioUrl });
 
