@@ -171,6 +171,10 @@ serve(async (req) => {
 
     if (!normalizedPhone) {
       console.log("No valid phone found in payload", JSON.stringify(phoneSources));
+      await auditUnrecognized("unrecognized_no_phone", {
+        phone_sources: phoneSources,
+        deep_sources_count: deepSourceEntries.length,
+      });
       return new Response(
         JSON.stringify({ success: true, message: "No phone - skipping" }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
