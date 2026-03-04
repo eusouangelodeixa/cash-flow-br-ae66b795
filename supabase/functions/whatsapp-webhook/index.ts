@@ -48,68 +48,89 @@ serve(async (req) => {
     
     console.log("Parsed event:", event, "data keys:", Object.keys(data || {}));
 
-    // Extract phone - prioritize chatid (has real phone number) over sender_lid
-    const chatid = data?.chatid || body?.chat?.wa_chatid || "";
-    const phoneFromChatid = chatid.replace("@s.whatsapp.net", "").replace("@c.us", "");
-    
-    const phone = phoneFromChatid || 
-                  data?.from || data?.phone || data?.sender_pn ||
-                  data?.key?.remoteJid?.replace("@s.whatsapp.net", "") ||
-                  body?.from || body?.phone ||
-                  body?.chat?.phone?.replace(/\D/g, "") || "";
+    // Extract phone candidates from different Uazapi payload formats
+    const normalizePhoneCandidate = (value: unknown): string => {
+      if (!value) return "";
+      const raw = String(value).trim();
+      if (!raw) return "";
 
-    if (!phone) {
-      console.log("No phone found in payload");
+      // Ignore non-user JIDs
+      if (raw.includes("@g.us") || raw.includes("status@broadcast")) return "";
+
+      let v = raw;
+      v = v.replace(/^whatsapp:/i, "");
+      v = v.replace(/@s\.whatsapp\.net$/i, "");
+      v = v.replace(/@c\.us$/i, "");
+      v = v.replace(/@lid$/i, "");
+
+      // JID/device suffix formats (e.g. 258879573759:12@s.whatsapp.net)
+      if (v.includes("@")) v = v.split("@")[0];
+      if (v.includes(":")) v = v.split(":")[0];
+
+      const digits = v.replace(/\D/g, "");
+      // E.164 max length is 15 digits. Ignore clearly invalid identifiers (LID/group-like ids)
+      if (digits.length < 8 || digits.length > 15) return "";
+      return digits;
+    };
+
+    const buildPhoneVariants = (phoneDigits: string): string[] => {
+      const variants = new Set<string>();
+      if (!phoneDigits) return [];
+
+      variants.add(phoneDigits);
+
+      // Try stripping 1, 2, or 3-digit country prefixes
+      for (let i = 1; i <= 3; i++) {
+        if (phoneDigits.length > i + 6) {
+          variants.add(phoneDigits.slice(i));
+        }
+      }
+
+      // Add suffixes for local-number matching
+      [8, 9, 10, 11, 12].forEach((len) => {
+        if (phoneDigits.length >= len) {
+          variants.add(phoneDigits.slice(-len));
+        }
+      });
+
+      return Array.from(variants).filter((p) => p.length >= 8 && p.length <= 15);
+    };
+
+    // Priority: sender phone first, then fallback sources
+    const phoneSources = [
+      { source: "sender_pn", value: data?.sender_pn || body?.sender_pn },
+      { source: "sender", value: data?.sender || body?.sender },
+      { source: "phone", value: data?.phone || body?.phone || body?.chat?.phone },
+      { source: "from", value: data?.from || body?.from },
+      { source: "chatid", value: data?.chatid || body?.chat?.wa_chatid },
+      { source: "remoteJid", value: data?.key?.remoteJid },
+    ];
+
+    const normalizedCandidates = phoneSources
+      .map((entry) => ({ ...entry, normalized: normalizePhoneCandidate(entry.value) }))
+      .filter((entry) => !!entry.normalized);
+
+    const normalizedPhone = normalizedCandidates[0]?.normalized || "";
+
+    if (!normalizedPhone) {
+      console.log("No valid phone found in payload", JSON.stringify(phoneSources));
       return new Response(
         JSON.stringify({ success: true, message: "No phone - skipping" }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Skip messages sent by the API itself
-    if (data?.fromMe === true || data?.wasSentByApi === true) {
-      console.log("Skipping own message");
-      return new Response(
-        JSON.stringify({ success: true, message: "Own message - skipping" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
+    // Build variants from all valid candidates to maximize match reliability
+    const phoneVariants = new Set<string>();
+    normalizedCandidates.forEach((entry) => {
+      buildPhoneVariants(entry.normalized).forEach((variant) => phoneVariants.add(variant));
+    });
 
-    console.log("Phone:", phone);
-
-    // Detect message type
-    const messageType = (data?.messageType || body?.messageType || "").toLowerCase();
-    const isAudio = messageType === "audiomessage" || messageType === "audio" ||
-                    data?.type === "audio" || data?.mimetype?.includes("audio") ||
-                    !!data?.audioMessage;
-    
-    const isText = messageType === "extendedtextmessage" || messageType === "conversation" ||
-                   data?.type === "text" || data?.type === "chat" || 
-                   !!data?.conversation || !!data?.extendedTextMessage;
-
-    const messageContent = data?.body || data?.text || data?.message || 
-                          data?.conversation || data?.extendedTextMessage?.text ||
-                          body?.body || body?.text || "";
-
-    const audioUrl = data?.content?.URL || data?.content?.url || 
-                     data?.audioUrl || data?.mediaUrl || data?.url || 
-                     data?.audioMessage?.url || body?.mediaUrl || "";
-
-    console.log("Message type:", { messageType, isAudio, isText, hasContent: !!messageContent, hasAudioUrl: !!audioUrl });
-
-    const normalizedPhone = phone.replace(/\D/g, "");
-    
-    // Generate phone variants dynamically for any country code (1-3 digits)
-    const phoneVariants = new Set([normalizedPhone]);
-    // Try stripping 1, 2, or 3 digit country codes
-    for (let i = 1; i <= 3; i++) {
-      if (normalizedPhone.length > i + 6) {
-        const stripped = normalizedPhone.slice(i);
-        phoneVariants.add(stripped);
-      }
-    }
-    const phoneVariantsArray = Array.from(phoneVariants).filter(p => p.length >= 8);
+    const phoneVariantsArray = Array.from(phoneVariants);
+    console.log("Phone candidates:", normalizedCandidates);
+    console.log("Phone selected:", normalizedPhone);
     console.log("Phone variants for lookup:", phoneVariantsArray);
+
 
     // Check if user is in verification flow
     const { data: pendingVerification } = await supabase
