@@ -131,6 +131,36 @@ serve(async (req) => {
     console.log("Phone selected:", normalizedPhone);
     console.log("Phone variants for lookup:", phoneVariantsArray);
 
+    // Skip messages sent by the API itself
+    if (data?.fromMe === true || data?.wasSentByApi === true) {
+      console.log("Skipping own message");
+      return new Response(
+        JSON.stringify({ success: true, message: "Own message - skipping" }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Detect message type
+    const messageType = (data?.messageType || body?.messageType || "").toLowerCase();
+    const isAudio = messageType === "audiomessage" || messageType === "audio" ||
+                    data?.type === "audio" || data?.mimetype?.includes("audio") ||
+                    !!data?.audioMessage;
+
+    const isText = messageType === "extendedtextmessage" || messageType === "conversation" ||
+                   data?.type === "text" || data?.type === "chat" ||
+                   !!data?.conversation || !!data?.extendedTextMessage;
+
+    const messageContent = data?.body || data?.text || data?.message ||
+                          data?.conversation || data?.extendedTextMessage?.text ||
+                          body?.body || body?.text || "";
+
+    const audioUrl = data?.content?.URL || data?.content?.url ||
+                     data?.audioUrl || data?.mediaUrl || data?.url ||
+                     data?.audioMessage?.url || body?.mediaUrl || "";
+
+    console.log("Message type:", { messageType, isAudio, isText, hasContent: !!messageContent, hasAudioUrl: !!audioUrl });
+
+    const phone = normalizedPhone;
 
     // Check if user is in verification flow
     const { data: pendingVerification } = await supabase
