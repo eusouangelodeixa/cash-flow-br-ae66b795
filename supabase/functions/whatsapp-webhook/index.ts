@@ -54,7 +54,7 @@ serve(async (req) => {
       const raw = String(value).trim();
       if (!raw) return "";
 
-      // Ignore non-user JIDs
+      // Ignore non-user chats/identifiers
       if (raw.includes("@g.us") || raw.includes("status@broadcast") || raw.includes("@lid")) return "";
 
       let v = raw;
@@ -68,7 +68,6 @@ serve(async (req) => {
       if (v.includes(":")) v = v.split(":")[0];
 
       const digits = v.replace(/\D/g, "");
-      // E.164 max length is 15 digits. Ignore clearly invalid identifiers (LID/group-like ids)
       if (digits.length < 8 || digits.length > 15) return "";
       return digits;
     };
@@ -81,16 +80,12 @@ serve(async (req) => {
 
       // Try stripping 1, 2, or 3-digit country prefixes
       for (let i = 1; i <= 3; i++) {
-        if (phoneDigits.length > i + 6) {
-          variants.add(phoneDigits.slice(i));
-        }
+        if (phoneDigits.length > i + 6) variants.add(phoneDigits.slice(i));
       }
 
       // Add suffixes for local-number matching
       [8, 9, 10, 11, 12].forEach((len) => {
-        if (phoneDigits.length >= len) {
-          variants.add(phoneDigits.slice(-len));
-        }
+        if (phoneDigits.length >= len) variants.add(phoneDigits.slice(-len));
       });
 
       return Array.from(variants).filter((p) => p.length >= 8 && p.length <= 15);
@@ -106,11 +101,40 @@ serve(async (req) => {
       { source: "remoteJid", value: data?.key?.remoteJid },
     ];
 
-    const normalizedCandidates = phoneSources
-      .map((entry) => ({ ...entry, normalized: normalizePhoneCandidate(entry.value) }))
-      .filter((entry) => !!entry.normalized);
+    // Deep scan fallback for unknown payload shapes
+    const deepSourceEntries: Array<{ source: string; value: string }> = [];
+    const visited = new WeakSet<object>();
+    const deepWalk = (value: unknown, path = "root", depth = 0) => {
+      if (depth > 5 || value === null || value === undefined) return;
 
-    const normalizedPhone = normalizedCandidates[0]?.normalized || "";
+      if (typeof value === "string") {
+        const hasPhoneLikePath = /(phone|chatid|from|sender|jid|participant|author|remote)/i.test(path);
+        const hasPhoneLikeValue = /@s\.whatsapp\.net|@c\.us|^\+?\d[\d\s\-()]{7,}$/.test(value);
+        if (hasPhoneLikePath || hasPhoneLikeValue) deepSourceEntries.push({ source: `deep:${path}`, value });
+        return;
+      }
+
+      if (Array.isArray(value)) {
+        value.slice(0, 60).forEach((item, idx) => deepWalk(item, `${path}[${idx}]`, depth + 1));
+        return;
+      }
+
+      if (typeof value === "object") {
+        const obj = value as Record<string, unknown>;
+        if (visited.has(obj)) return;
+        visited.add(obj);
+        Object.entries(obj).slice(0, 120).forEach(([key, val]) => deepWalk(val, `${path}.${key}`, depth + 1));
+      }
+    };
+
+    deepWalk(body);
+
+    const normalizedCandidates = [...phoneSources, ...deepSourceEntries]
+      .map((entry) => ({ ...entry, normalized: normalizePhoneCandidate(entry.value) }))
+      .filter((entry, idx, arr) => !!entry.normalized && arr.findIndex((x) => x.normalized === entry.normalized) === idx);
+
+    const selectedCandidate = normalizedCandidates[0] || null;
+    const normalizedPhone = selectedCandidate?.normalized || "";
 
     if (!normalizedPhone) {
       console.log("No valid phone found in payload", JSON.stringify(phoneSources));
@@ -127,8 +151,10 @@ serve(async (req) => {
     });
 
     const phoneVariantsArray = Array.from(phoneVariants);
+    const hasTrustedCandidate = normalizedCandidates.some((entry) => ["sender_pn", "phone", "chatid", "remoteJid"].includes(entry.source));
+
     console.log("Phone candidates:", normalizedCandidates);
-    console.log("Phone selected:", normalizedPhone);
+    console.log("Phone selected:", normalizedPhone, "source:", selectedCandidate?.source);
     console.log("Phone variants for lookup:", phoneVariantsArray);
 
     // Skip messages sent by the API itself
@@ -160,7 +186,7 @@ serve(async (req) => {
 
     console.log("Message type:", { messageType, isAudio, isText, hasContent: !!messageContent, hasAudioUrl: !!audioUrl });
 
-    const phone = normalizedPhone;
+    let phone = normalizedPhone;
 
     // Check if user is in verification flow
     const { data: pendingVerification } = await supabase
