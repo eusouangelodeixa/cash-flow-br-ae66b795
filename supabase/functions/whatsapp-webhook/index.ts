@@ -96,13 +96,13 @@ serve(async (req) => {
       return Array.from(variants).filter((p) => p.length >= 8 && p.length <= 15);
     };
 
-    // Priority: sender phone first, then fallback sources
+    // Priority: sender phone first, then direct chat id, then fallback sources
     const phoneSources = [
       { source: "sender_pn", value: data?.sender_pn || body?.sender_pn },
       { source: "sender", value: data?.sender || body?.sender },
       { source: "phone", value: data?.phone || body?.phone || body?.chat?.phone },
-      { source: "from", value: data?.from || body?.from },
       { source: "chatid", value: data?.chatid || body?.chat?.wa_chatid },
+      { source: "from", value: data?.from || body?.from },
       { source: "remoteJid", value: data?.key?.remoteJid },
     ];
 
