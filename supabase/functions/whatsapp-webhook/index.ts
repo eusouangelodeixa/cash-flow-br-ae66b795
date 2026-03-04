@@ -243,26 +243,46 @@ serve(async (req) => {
       .eq("whatsapp_verified", true)
       .limit(1)
       .maybeSingle();
-    
+
     profile = profileData;
 
-    // Fallback: try matching by phone suffix (last 9+ digits)
-    if (!profile && normalizedPhone.length >= 9) {
-      const phoneSuffix = normalizedPhone.slice(-9);
-      const { data: fallbackProfile } = await supabase
-        .from("profiles")
-        .select("id, nome, whatsapp")
-        .eq("whatsapp_verified", true)
-        .like("whatsapp", `%${phoneSuffix}`)
-        .limit(1)
-        .maybeSingle();
-      profile = fallbackProfile;
-      if (profile) console.log("Profile found via suffix fallback:", profile.whatsapp);
+    // Fallback: try matching by phone suffix from all candidates
+    if (!profile) {
+      const suffixes = Array.from(new Set(phoneVariantsArray.filter((p) => p.length >= 9).map((p) => p.slice(-9))));
+      for (const suffix of suffixes) {
+        const { data: fallbackProfile } = await supabase
+          .from("profiles")
+          .select("id, nome, whatsapp")
+          .eq("whatsapp_verified", true)
+          .like("whatsapp", `%${suffix}`)
+          .limit(1)
+          .maybeSingle();
+
+        if (fallbackProfile) {
+          profile = fallbackProfile;
+          console.log("Profile found via suffix fallback:", profile.whatsapp, "suffix:", suffix);
+          break;
+        }
+      }
     }
 
     console.log("Profile lookup:", { phoneVariantsArray, found: !!profile, profileWhatsapp: profile?.whatsapp });
 
     if (!profile) {
+      const inboundLooksUserMessage = isAudio || isText || !!messageContent || !!audioUrl;
+
+      // Ambiguous payloads should not trigger false "vincule seu número"
+      if (!hasTrustedCandidate || !inboundLooksUserMessage) {
+        console.log("Skipping not_verified auto-reply due ambiguous payload", {
+          hasTrustedCandidate,
+          inboundLooksUserMessage,
+          selectedSource: selectedCandidate?.source,
+        });
+        return new Response(JSON.stringify({ success: true, reason: "ambiguous_phone_payload" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
       if (uazapiUrl && uazapiToken) {
         await sendWhatsApp(uazapiUrl, uazapiToken, phone,
           "👋 Olá! Para usar o assistente por WhatsApp, primeiro vincule seu número no app CashFlow na seção Perfil."
@@ -272,6 +292,9 @@ serve(async (req) => {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
+
+    // Prefer verified profile phone as canonical routing number
+    phone = (profile.whatsapp || "").replace(/\D/g, "") || phone;
 
     // Deduplicação anti-loop para eventos repetidos de áudio (Uazapi pode reenviar o mesmo webhook)
     const recentCutoff = new Date(Date.now() - 90 * 1000).toISOString();
