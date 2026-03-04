@@ -98,12 +98,18 @@ serve(async (req) => {
     console.log("Message type:", { messageType, isAudio, isText, hasContent: !!messageContent, hasAudioUrl: !!audioUrl });
 
     const normalizedPhone = phone.replace(/\D/g, "");
-    // Also try with/without country code
-    const phoneVariants = [
+    // Generate phone variants: exact, without common country codes, with 55 prefix
+    const phoneVariants = new Set([
       normalizedPhone,
       normalizedPhone.replace(/^55/, ""),
       `55${normalizedPhone.replace(/^55/, "")}`,
-    ];
+      // Also try stripping other common country codes
+      normalizedPhone.replace(/^258/, ""),
+      normalizedPhone.replace(/^351/, ""),
+      normalizedPhone.replace(/^1/, ""),
+    ]);
+    const phoneVariantsArray = Array.from(phoneVariants).filter(p => p.length >= 8);
+    console.log("Phone variants for lookup:", phoneVariantsArray);
 
     // Check if user is in verification flow
     const { data: pendingVerification } = await supabase
