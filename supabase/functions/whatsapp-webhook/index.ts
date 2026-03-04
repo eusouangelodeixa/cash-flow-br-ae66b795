@@ -204,25 +204,29 @@ serve(async (req) => {
     }
 
     // Detect message type
-    const messageType = (data?.messageType || body?.messageType || "").toLowerCase();
+    const messageType = (data?.messageType || body?.messageType || data?.type || body?.type || "").toLowerCase();
     const isAudio = messageType === "audiomessage" || messageType === "audio" ||
                     data?.type === "audio" || data?.mimetype?.includes("audio") ||
                     !!data?.audioMessage || !!data?.message?.audioMessage || !!body?.message?.audioMessage;
 
-    const isText = messageType === "extendedtextmessage" || messageType === "conversation" ||
-                   data?.type === "text" || data?.type === "chat" ||
-                   !!data?.conversation || !!data?.extendedTextMessage;
+    const rawTextMessage = data?.body ?? data?.text ?? data?.conversation ??
+                           data?.extendedTextMessage?.text ?? body?.body ?? body?.text ??
+                           body?.message?.conversation ?? data?.message?.conversation ?? "";
 
-    const messageContent = data?.body || data?.text || data?.message ||
-                          data?.conversation || data?.extendedTextMessage?.text ||
-                          body?.body || body?.text || "";
+    const messageContent = typeof rawTextMessage === "string" ? rawTextMessage.trim() : "";
+
+    const isText = messageType === "extendedtextmessage" || messageType === "conversation" ||
+                   messageType === "text" || data?.type === "text" || data?.type === "chat" ||
+                   !!data?.conversation || !!data?.extendedTextMessage || (!isAudio && messageContent.length > 0);
 
     const audioUrl = data?.content?.URL || data?.content?.url ||
                      data?.audioUrl || data?.mediaUrl || data?.url ||
                      data?.audioMessage?.url || data?.message?.audioMessage?.url ||
                      body?.mediaUrl || body?.audioMessage?.url || body?.message?.audioMessage?.url || "";
 
-    console.log("Message type:", { messageType, isAudio, isText, hasContent: !!messageContent, hasAudioUrl: !!audioUrl });
+    const hasTextContent = messageContent.length > 0;
+
+    console.log("Message type:", { messageType, isAudio, isText, hasTextContent, hasAudioUrl: !!audioUrl });
 
     let phone = normalizedPhone;
 
