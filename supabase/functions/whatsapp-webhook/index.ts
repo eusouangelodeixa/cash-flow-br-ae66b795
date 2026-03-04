@@ -170,7 +170,7 @@ serve(async (req) => {
     const messageType = (data?.messageType || body?.messageType || "").toLowerCase();
     const isAudio = messageType === "audiomessage" || messageType === "audio" ||
                     data?.type === "audio" || data?.mimetype?.includes("audio") ||
-                    !!data?.audioMessage;
+                    !!data?.audioMessage || !!data?.message?.audioMessage || !!body?.message?.audioMessage;
 
     const isText = messageType === "extendedtextmessage" || messageType === "conversation" ||
                    data?.type === "text" || data?.type === "chat" ||
@@ -182,7 +182,8 @@ serve(async (req) => {
 
     const audioUrl = data?.content?.URL || data?.content?.url ||
                      data?.audioUrl || data?.mediaUrl || data?.url ||
-                     data?.audioMessage?.url || body?.mediaUrl || "";
+                     data?.audioMessage?.url || data?.message?.audioMessage?.url ||
+                     body?.mediaUrl || body?.audioMessage?.url || body?.message?.audioMessage?.url || "";
 
     console.log("Message type:", { messageType, isAudio, isText, hasContent: !!messageContent, hasAudioUrl: !!audioUrl });
 
@@ -279,6 +280,17 @@ serve(async (req) => {
           selectedSource: selectedCandidate?.source,
         });
         return new Response(JSON.stringify({ success: true, reason: "ambiguous_phone_payload" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      // Never send "não vinculado" for audio to avoid false negatives on provider payload variations
+      if (isAudio) {
+        console.log("Skipping not_verified auto-reply for audio", {
+          selectedSource: selectedCandidate?.source,
+          phone,
+        });
+        return new Response(JSON.stringify({ success: true, reason: "audio_unmatched_profile" }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
