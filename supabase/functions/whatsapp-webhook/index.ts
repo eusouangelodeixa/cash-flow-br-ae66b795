@@ -98,16 +98,16 @@ serve(async (req) => {
     console.log("Message type:", { messageType, isAudio, isText, hasContent: !!messageContent, hasAudioUrl: !!audioUrl });
 
     const normalizedPhone = phone.replace(/\D/g, "");
-    // Generate phone variants: exact, without common country codes, with 55 prefix
-    const phoneVariants = new Set([
-      normalizedPhone,
-      normalizedPhone.replace(/^55/, ""),
-      `55${normalizedPhone.replace(/^55/, "")}`,
-      // Also try stripping other common country codes
-      normalizedPhone.replace(/^258/, ""),
-      normalizedPhone.replace(/^351/, ""),
-      normalizedPhone.replace(/^1/, ""),
-    ]);
+    
+    // Generate phone variants dynamically for any country code (1-3 digits)
+    const phoneVariants = new Set([normalizedPhone]);
+    // Try stripping 1, 2, or 3 digit country codes
+    for (let i = 1; i <= 3; i++) {
+      if (normalizedPhone.length > i + 6) {
+        const stripped = normalizedPhone.slice(i);
+        phoneVariants.add(stripped);
+      }
+    }
     const phoneVariantsArray = Array.from(phoneVariants).filter(p => p.length >= 8);
     console.log("Phone variants for lookup:", phoneVariantsArray);
 
