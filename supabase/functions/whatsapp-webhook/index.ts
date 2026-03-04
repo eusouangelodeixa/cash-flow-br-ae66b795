@@ -52,7 +52,33 @@ serve(async (req) => {
     // Try to extract message data from various formats
     const event = body.event || body.type || "";
     const data = body.data || body.message || body;
-    
+
+    const toJsonSafe = (value: unknown) => {
+      try {
+        return JSON.parse(JSON.stringify(value ?? {}));
+      } catch {
+        return { serialization_error: true };
+      }
+    };
+
+    const auditUnrecognized = async (
+      reason: string,
+      details: Record<string, unknown> = {},
+      phone: string | null = null,
+    ) => {
+      const { error: auditError } = await supabase.from("whatsapp_audit_events").insert({
+        reason,
+        event: String(event || "unknown"),
+        phone,
+        payload: toJsonSafe(body),
+        details: toJsonSafe(details),
+      });
+
+      if (auditError) {
+        console.error("Failed to insert whatsapp_audit_events:", auditError.message);
+      }
+    };
+
     console.log("Parsed event:", event, "data keys:", Object.keys(data || {}));
 
     // Extract phone candidates from different Uazapi payload formats
