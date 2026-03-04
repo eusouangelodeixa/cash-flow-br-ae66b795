@@ -54,7 +54,7 @@ serve(async (req) => {
       const raw = String(value).trim();
       if (!raw) return "";
 
-      // Ignore non-user JIDs
+      // Ignore non-user chats/identifiers
       if (raw.includes("@g.us") || raw.includes("status@broadcast") || raw.includes("@lid")) return "";
 
       let v = raw;
@@ -68,7 +68,6 @@ serve(async (req) => {
       if (v.includes(":")) v = v.split(":")[0];
 
       const digits = v.replace(/\D/g, "");
-      // E.164 max length is 15 digits. Ignore clearly invalid identifiers (LID/group-like ids)
       if (digits.length < 8 || digits.length > 15) return "";
       return digits;
     };
@@ -81,16 +80,12 @@ serve(async (req) => {
 
       // Try stripping 1, 2, or 3-digit country prefixes
       for (let i = 1; i <= 3; i++) {
-        if (phoneDigits.length > i + 6) {
-          variants.add(phoneDigits.slice(i));
-        }
+        if (phoneDigits.length > i + 6) variants.add(phoneDigits.slice(i));
       }
 
       // Add suffixes for local-number matching
       [8, 9, 10, 11, 12].forEach((len) => {
-        if (phoneDigits.length >= len) {
-          variants.add(phoneDigits.slice(-len));
-        }
+        if (phoneDigits.length >= len) variants.add(phoneDigits.slice(-len));
       });
 
       return Array.from(variants).filter((p) => p.length >= 8 && p.length <= 15);
@@ -106,11 +101,40 @@ serve(async (req) => {
       { source: "remoteJid", value: data?.key?.remoteJid },
     ];
 
-    const normalizedCandidates = phoneSources
-      .map((entry) => ({ ...entry, normalized: normalizePhoneCandidate(entry.value) }))
-      .filter((entry) => !!entry.normalized);
+    // Deep scan fallback for unknown payload shapes
+    const deepSourceEntries: Array<{ source: string; value: string }> = [];
+    const visited = new WeakSet<object>();
+    const deepWalk = (value: unknown, path = "root", depth = 0) => {
+      if (depth > 5 || value === null || value === undefined) return;
 
-    const normalizedPhone = normalizedCandidates[0]?.normalized || "";
+      if (typeof value === "string") {
+        const hasPhoneLikePath = /(phone|chatid|from|sender|jid|participant|author|remote)/i.test(path);
+        const hasPhoneLikeValue = /@s\.whatsapp\.net|@c\.us|^\+?\d[\d\s\-()]{7,}$/.test(value);
+        if (hasPhoneLikePath || hasPhoneLikeValue) deepSourceEntries.push({ source: `deep:${path}`, value });
+        return;
+      }
+
+      if (Array.isArray(value)) {
+        value.slice(0, 60).forEach((item, idx) => deepWalk(item, `${path}[${idx}]`, depth + 1));
+        return;
+      }
+
+      if (typeof value === "object") {
+        const obj = value as Record<string, unknown>;
+        if (visited.has(obj)) return;
+        visited.add(obj);
+        Object.entries(obj).slice(0, 120).forEach(([key, val]) => deepWalk(val, `${path}.${key}`, depth + 1));
+      }
+    };
+
+    deepWalk(body);
+
+    const normalizedCandidates = [...phoneSources, ...deepSourceEntries]
+      .map((entry) => ({ ...entry, normalized: normalizePhoneCandidate(entry.value) }))
+      .filter((entry, idx, arr) => !!entry.normalized && arr.findIndex((x) => x.normalized === entry.normalized) === idx);
+
+    const selectedCandidate = normalizedCandidates[0] || null;
+    const normalizedPhone = selectedCandidate?.normalized || "";
 
     if (!normalizedPhone) {
       console.log("No valid phone found in payload", JSON.stringify(phoneSources));
@@ -127,8 +151,10 @@ serve(async (req) => {
     });
 
     const phoneVariantsArray = Array.from(phoneVariants);
+    const hasTrustedCandidate = normalizedCandidates.some((entry) => ["sender_pn", "phone", "chatid", "remoteJid"].includes(entry.source));
+
     console.log("Phone candidates:", normalizedCandidates);
-    console.log("Phone selected:", normalizedPhone);
+    console.log("Phone selected:", normalizedPhone, "source:", selectedCandidate?.source);
     console.log("Phone variants for lookup:", phoneVariantsArray);
 
     // Skip messages sent by the API itself
@@ -160,7 +186,7 @@ serve(async (req) => {
 
     console.log("Message type:", { messageType, isAudio, isText, hasContent: !!messageContent, hasAudioUrl: !!audioUrl });
 
-    const phone = normalizedPhone;
+    let phone = normalizedPhone;
 
     // Check if user is in verification flow
     const { data: pendingVerification } = await supabase
@@ -217,26 +243,46 @@ serve(async (req) => {
       .eq("whatsapp_verified", true)
       .limit(1)
       .maybeSingle();
-    
+
     profile = profileData;
 
-    // Fallback: try matching by phone suffix (last 9+ digits)
-    if (!profile && normalizedPhone.length >= 9) {
-      const phoneSuffix = normalizedPhone.slice(-9);
-      const { data: fallbackProfile } = await supabase
-        .from("profiles")
-        .select("id, nome, whatsapp")
-        .eq("whatsapp_verified", true)
-        .like("whatsapp", `%${phoneSuffix}`)
-        .limit(1)
-        .maybeSingle();
-      profile = fallbackProfile;
-      if (profile) console.log("Profile found via suffix fallback:", profile.whatsapp);
+    // Fallback: try matching by phone suffix from all candidates
+    if (!profile) {
+      const suffixes = Array.from(new Set(phoneVariantsArray.filter((p) => p.length >= 9).map((p) => p.slice(-9))));
+      for (const suffix of suffixes) {
+        const { data: fallbackProfile } = await supabase
+          .from("profiles")
+          .select("id, nome, whatsapp")
+          .eq("whatsapp_verified", true)
+          .like("whatsapp", `%${suffix}`)
+          .limit(1)
+          .maybeSingle();
+
+        if (fallbackProfile) {
+          profile = fallbackProfile;
+          console.log("Profile found via suffix fallback:", profile.whatsapp, "suffix:", suffix);
+          break;
+        }
+      }
     }
 
     console.log("Profile lookup:", { phoneVariantsArray, found: !!profile, profileWhatsapp: profile?.whatsapp });
 
     if (!profile) {
+      const inboundLooksUserMessage = isAudio || isText || !!messageContent || !!audioUrl;
+
+      // Ambiguous payloads should not trigger false "vincule seu número"
+      if (!hasTrustedCandidate || !inboundLooksUserMessage) {
+        console.log("Skipping not_verified auto-reply due ambiguous payload", {
+          hasTrustedCandidate,
+          inboundLooksUserMessage,
+          selectedSource: selectedCandidate?.source,
+        });
+        return new Response(JSON.stringify({ success: true, reason: "ambiguous_phone_payload" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
       if (uazapiUrl && uazapiToken) {
         await sendWhatsApp(uazapiUrl, uazapiToken, phone,
           "👋 Olá! Para usar o assistente por WhatsApp, primeiro vincule seu número no app CashFlow na seção Perfil."
@@ -247,6 +293,9 @@ serve(async (req) => {
       });
     }
 
+    // Prefer verified profile phone as canonical routing number
+    phone = (profile.whatsapp || "").replace(/\D/g, "") || phone;
+
     // Deduplicação anti-loop para eventos repetidos de áudio (Uazapi pode reenviar o mesmo webhook)
     const recentCutoff = new Date(Date.now() - 90 * 1000).toISOString();
     if (isAudio && audioUrl) {
@@ -254,7 +303,7 @@ serve(async (req) => {
         .from("whatsapp_messages")
         .select("id")
         .eq("user_id", profile.id)
-        .eq("phone", normalizedPhone)
+        .eq("phone", phone)
         .eq("direction", "incoming")
         .eq("message_type", "audio")
         .eq("content", audioUrl)
@@ -263,7 +312,7 @@ serve(async (req) => {
         .maybeSingle();
 
       if (duplicateAudio) {
-        console.log("Duplicate audio webhook ignored:", { phone: normalizedPhone, audioUrl, duplicateId: duplicateAudio.id });
+        console.log("Duplicate audio webhook ignored:", { phone, audioUrl, duplicateId: duplicateAudio.id });
         return new Response(JSON.stringify({ success: true, deduplicated: true }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
@@ -275,7 +324,7 @@ serve(async (req) => {
       .from("whatsapp_messages")
       .insert({
         user_id: profile.id,
-        phone: normalizedPhone,
+        phone,
         direction: "incoming",
         message_type: isAudio ? "audio" : "text",
         content: isAudio ? audioUrl : messageContent,
