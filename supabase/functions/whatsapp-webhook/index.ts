@@ -36,6 +36,13 @@ serve(async (req) => {
       body = JSON.parse(rawBody);
     } catch {
       console.error("Failed to parse webhook body");
+      await supabase.from("whatsapp_audit_events").insert({
+        reason: "invalid_json",
+        event: "unknown",
+        phone: null,
+        payload: { raw: rawBody.slice(0, 20000), invalid_json: true },
+        details: { note: "Webhook body não pôde ser parseado" },
+      });
       return new Response(JSON.stringify({ error: "Invalid JSON" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -45,7 +52,33 @@ serve(async (req) => {
     // Try to extract message data from various formats
     const event = body.event || body.type || "";
     const data = body.data || body.message || body;
-    
+
+    const toJsonSafe = (value: unknown) => {
+      try {
+        return JSON.parse(JSON.stringify(value ?? {}));
+      } catch {
+        return { serialization_error: true };
+      }
+    };
+
+    const auditUnrecognized = async (
+      reason: string,
+      details: Record<string, unknown> = {},
+      phone: string | null = null,
+    ) => {
+      const { error: auditError } = await supabase.from("whatsapp_audit_events").insert({
+        reason,
+        event: String(event || "unknown"),
+        phone,
+        payload: toJsonSafe(body),
+        details: toJsonSafe(details),
+      });
+
+      if (auditError) {
+        console.error("Failed to insert whatsapp_audit_events:", auditError.message);
+      }
+    };
+
     console.log("Parsed event:", event, "data keys:", Object.keys(data || {}));
 
     // Extract phone candidates from different Uazapi payload formats
@@ -138,6 +171,10 @@ serve(async (req) => {
 
     if (!normalizedPhone) {
       console.log("No valid phone found in payload", JSON.stringify(phoneSources));
+      await auditUnrecognized("unrecognized_no_phone", {
+        phone_sources: phoneSources,
+        deep_sources_count: deepSourceEntries.length,
+      });
       return new Response(
         JSON.stringify({ success: true, message: "No phone - skipping" }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -158,7 +195,7 @@ serve(async (req) => {
     console.log("Phone variants for lookup:", phoneVariantsArray);
 
     // Skip messages sent by the API itself
-    if (data?.fromMe === true || data?.wasSentByApi === true) {
+    if (data?.fromMe === true || data?.key?.fromMe === true || body?.fromMe === true || data?.wasSentByApi === true) {
       console.log("Skipping own message");
       return new Response(
         JSON.stringify({ success: true, message: "Own message - skipping" }),
@@ -167,25 +204,29 @@ serve(async (req) => {
     }
 
     // Detect message type
-    const messageType = (data?.messageType || body?.messageType || "").toLowerCase();
+    const messageType = (data?.messageType || body?.messageType || data?.type || body?.type || "").toLowerCase();
     const isAudio = messageType === "audiomessage" || messageType === "audio" ||
                     data?.type === "audio" || data?.mimetype?.includes("audio") ||
                     !!data?.audioMessage || !!data?.message?.audioMessage || !!body?.message?.audioMessage;
 
-    const isText = messageType === "extendedtextmessage" || messageType === "conversation" ||
-                   data?.type === "text" || data?.type === "chat" ||
-                   !!data?.conversation || !!data?.extendedTextMessage;
+    const rawTextMessage = data?.body ?? data?.text ?? data?.conversation ??
+                           data?.extendedTextMessage?.text ?? body?.body ?? body?.text ??
+                           body?.message?.conversation ?? data?.message?.conversation ?? "";
 
-    const messageContent = data?.body || data?.text || data?.message ||
-                          data?.conversation || data?.extendedTextMessage?.text ||
-                          body?.body || body?.text || "";
+    const messageContent = typeof rawTextMessage === "string" ? rawTextMessage.trim() : "";
+
+    const isText = messageType === "extendedtextmessage" || messageType === "conversation" ||
+                   messageType === "text" || data?.type === "text" || data?.type === "chat" ||
+                   !!data?.conversation || !!data?.extendedTextMessage || (!isAudio && messageContent.length > 0);
 
     const audioUrl = data?.content?.URL || data?.content?.url ||
                      data?.audioUrl || data?.mediaUrl || data?.url ||
                      data?.audioMessage?.url || data?.message?.audioMessage?.url ||
                      body?.mediaUrl || body?.audioMessage?.url || body?.message?.audioMessage?.url || "";
 
-    console.log("Message type:", { messageType, isAudio, isText, hasContent: !!messageContent, hasAudioUrl: !!audioUrl });
+    const hasTextContent = messageContent.length > 0;
+
+    console.log("Message type:", { messageType, isAudio, isText, hasTextContent, hasAudioUrl: !!audioUrl });
 
     let phone = normalizedPhone;
 
@@ -270,7 +311,7 @@ serve(async (req) => {
     console.log("Profile lookup:", { phoneVariantsArray, found: !!profile, profileWhatsapp: profile?.whatsapp });
 
     if (!profile) {
-      const inboundLooksUserMessage = isAudio || isText || !!messageContent || !!audioUrl;
+      const inboundLooksUserMessage = isAudio || isText || hasTextContent || !!audioUrl;
 
       // Ambiguous payloads should not trigger false "vincule seu número"
       if (!hasTrustedCandidate || !inboundLooksUserMessage) {
@@ -279,6 +320,14 @@ serve(async (req) => {
           inboundLooksUserMessage,
           selectedSource: selectedCandidate?.source,
         });
+        await auditUnrecognized("unrecognized_ambiguous_payload", {
+          hasTrustedCandidate,
+          inboundLooksUserMessage,
+          selected_source: selectedCandidate?.source || null,
+          message_type: messageType,
+          has_audio_url: !!audioUrl,
+          has_text_content: hasTextContent,
+        }, phone);
         return new Response(JSON.stringify({ success: true, reason: "ambiguous_phone_payload" }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
@@ -290,6 +339,11 @@ serve(async (req) => {
           selectedSource: selectedCandidate?.source,
           phone,
         });
+        await auditUnrecognized("audio_unmatched_profile", {
+          selected_source: selectedCandidate?.source || null,
+          message_type: messageType,
+          has_audio_url: !!audioUrl,
+        }, phone);
         return new Response(JSON.stringify({ success: true, reason: "audio_unmatched_profile" }), {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
@@ -300,6 +354,10 @@ serve(async (req) => {
           "👋 Olá! Para usar o assistente por WhatsApp, primeiro vincule seu número no app CashFlow na seção Perfil."
         );
       }
+      await auditUnrecognized("not_verified_text_auto_reply", {
+        selected_source: selectedCandidate?.source || null,
+        message_type: messageType,
+      }, phone);
       return new Response(JSON.stringify({ success: false, reason: "not_verified" }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -352,43 +410,82 @@ serve(async (req) => {
     console.log("Message logged:", msgRecord?.id);
 
     // Process with AI (audio or text)
-    if ((isAudio && audioUrl) || (isText && messageContent)) {
-      console.log("Calling whatsapp-process-audio...");
-      const processRes = await fetch(`${supabaseUrl}/functions/v1/whatsapp-process-audio`, {
+    const shouldProcessAudio = isAudio && !!audioUrl;
+    const shouldProcessText = !isAudio && hasTextContent;
+
+    if (shouldProcessAudio || shouldProcessText) {
+      const processPayload = {
+        audioUrl: shouldProcessAudio ? audioUrl : undefined,
+        textContent: shouldProcessText ? messageContent : undefined,
+        phone,
+        messageId: msgRecord?.id,
+        whatsappMessageId: data?.messageid || "",
+        rawMessageId: data?.id || "",
+        skipTranscription: shouldProcessText,
+      };
+
+      console.log("Calling whatsapp-process-audio...", {
+        shouldProcessAudio,
+        shouldProcessText,
+        messageId: msgRecord?.id,
+      });
+
+      const processPromise = fetch(`${supabaseUrl}/functions/v1/whatsapp-process-audio`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${supabaseServiceKey}`,
         },
-        body: JSON.stringify({
-          audioUrl: isAudio ? audioUrl : undefined,
-          textContent: isText ? messageContent : undefined,
-          phone,
-          messageId: msgRecord?.id,
-          whatsappMessageId: data?.messageid || "",
-          rawMessageId: data?.id || "",
-          skipTranscription: isText,
-        }),
-      });
+        body: JSON.stringify(processPayload),
+      })
+        .then(async (processRes) => {
+          const result = await processRes.json().catch(() => ({}));
+          console.log("Process-audio result:", JSON.stringify(result).substring(0, 500));
 
-      const result = await processRes.json().catch(() => ({}));
-      console.log("Process-audio result:", JSON.stringify(result).substring(0, 500));
+          if (!processRes.ok || result?.error) {
+            await auditUnrecognized("process_audio_error", {
+              status: processRes.status,
+              result,
+              should_process_audio: shouldProcessAudio,
+              should_process_text: shouldProcessText,
+            }, phone);
 
-      if (!processRes.ok || result?.error) {
-        if (uazapiUrl && uazapiToken) {
-          await sendWhatsApp(
-            uazapiUrl,
-            uazapiToken,
-            phone,
-            "⚠️ Recebi seu áudio, mas não consegui processar agora. Tente novamente em alguns segundos ou envie o comando em texto para eu confirmar execução/não execução."
-          );
-        }
+            if (uazapiUrl && uazapiToken) {
+              const fallbackMessage = shouldProcessAudio
+                ? "⚠️ Recebi seu áudio, mas não consegui processar agora. Tente novamente em alguns segundos ou envie o comando em texto para eu confirmar execução/não execução."
+                : "⚠️ Recebi sua mensagem, mas não consegui processar agora. Tente novamente em alguns segundos.";
+
+              await sendWhatsApp(uazapiUrl, uazapiToken, phone, fallbackMessage);
+            }
+          }
+        })
+        .catch(async (err) => {
+          console.error("Process-audio request failed:", err);
+          await auditUnrecognized("process_audio_exception", {
+            error: String(err?.message || err),
+            should_process_audio: shouldProcessAudio,
+            should_process_text: shouldProcessText,
+          }, phone);
+        });
+
+      const edgeRuntime = (globalThis as any).EdgeRuntime;
+      if (edgeRuntime?.waitUntil) {
+        edgeRuntime.waitUntil(processPromise);
+      } else {
+        await processPromise;
       }
 
-      return new Response(JSON.stringify({ success: processRes.ok, result }), {
+      return new Response(JSON.stringify({ success: true, queued: true }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
+
+    await auditUnrecognized("unrecognized_unsupported_message", {
+      message_type: messageType,
+      has_audio_url: !!audioUrl,
+      has_text_content: hasTextContent,
+      selected_source: selectedCandidate?.source || null,
+    }, phone);
 
     return new Response(JSON.stringify({ success: true, message: "Message received" }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
