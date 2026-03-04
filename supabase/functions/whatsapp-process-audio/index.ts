@@ -645,8 +645,9 @@ Sempre responda APENAS com o JSON, sem markdown.`;
       );
 
       if (recalculatedMissing.length === 0) {
+        const { missing_fields, partial_action, question, ...cleaned } = repaired;
         interpretedAction = {
-          ...repaired,
+          ...cleaned,
           action: "register_device",
         };
       } else {
