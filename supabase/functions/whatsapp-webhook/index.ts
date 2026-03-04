@@ -283,6 +283,17 @@ serve(async (req) => {
         });
       }
 
+      // Never send "não vinculado" for audio to avoid false negatives on provider payload variations
+      if (isAudio) {
+        console.log("Skipping not_verified auto-reply for audio", {
+          selectedSource: selectedCandidate?.source,
+          phone,
+        });
+        return new Response(JSON.stringify({ success: true, reason: "audio_unmatched_profile" }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
       if (uazapiUrl && uazapiToken) {
         await sendWhatsApp(uazapiUrl, uazapiToken, phone,
           "👋 Olá! Para usar o assistente por WhatsApp, primeiro vincule seu número no app CashFlow na seção Perfil."
