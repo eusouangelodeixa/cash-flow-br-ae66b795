@@ -55,7 +55,7 @@ serve(async (req) => {
       if (!raw) return "";
 
       // Ignore non-user JIDs
-      if (raw.includes("@g.us") || raw.includes("status@broadcast")) return "";
+      if (raw.includes("@g.us") || raw.includes("status@broadcast") || raw.includes("@lid")) return "";
 
       let v = raw;
       v = v.replace(/^whatsapp:/i, "");
