@@ -410,43 +410,82 @@ serve(async (req) => {
     console.log("Message logged:", msgRecord?.id);
 
     // Process with AI (audio or text)
-    if ((isAudio && audioUrl) || (isText && messageContent)) {
-      console.log("Calling whatsapp-process-audio...");
-      const processRes = await fetch(`${supabaseUrl}/functions/v1/whatsapp-process-audio`, {
+    const shouldProcessAudio = isAudio && !!audioUrl;
+    const shouldProcessText = !isAudio && hasTextContent;
+
+    if (shouldProcessAudio || shouldProcessText) {
+      const processPayload = {
+        audioUrl: shouldProcessAudio ? audioUrl : undefined,
+        textContent: shouldProcessText ? messageContent : undefined,
+        phone,
+        messageId: msgRecord?.id,
+        whatsappMessageId: data?.messageid || "",
+        rawMessageId: data?.id || "",
+        skipTranscription: shouldProcessText,
+      };
+
+      console.log("Calling whatsapp-process-audio...", {
+        shouldProcessAudio,
+        shouldProcessText,
+        messageId: msgRecord?.id,
+      });
+
+      const processPromise = fetch(`${supabaseUrl}/functions/v1/whatsapp-process-audio`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${supabaseServiceKey}`,
         },
-        body: JSON.stringify({
-          audioUrl: isAudio ? audioUrl : undefined,
-          textContent: isText ? messageContent : undefined,
-          phone,
-          messageId: msgRecord?.id,
-          whatsappMessageId: data?.messageid || "",
-          rawMessageId: data?.id || "",
-          skipTranscription: isText,
-        }),
-      });
+        body: JSON.stringify(processPayload),
+      })
+        .then(async (processRes) => {
+          const result = await processRes.json().catch(() => ({}));
+          console.log("Process-audio result:", JSON.stringify(result).substring(0, 500));
 
-      const result = await processRes.json().catch(() => ({}));
-      console.log("Process-audio result:", JSON.stringify(result).substring(0, 500));
+          if (!processRes.ok || result?.error) {
+            await auditUnrecognized("process_audio_error", {
+              status: processRes.status,
+              result,
+              should_process_audio: shouldProcessAudio,
+              should_process_text: shouldProcessText,
+            }, phone);
 
-      if (!processRes.ok || result?.error) {
-        if (uazapiUrl && uazapiToken) {
-          await sendWhatsApp(
-            uazapiUrl,
-            uazapiToken,
-            phone,
-            "⚠️ Recebi seu áudio, mas não consegui processar agora. Tente novamente em alguns segundos ou envie o comando em texto para eu confirmar execução/não execução."
-          );
-        }
+            if (uazapiUrl && uazapiToken) {
+              const fallbackMessage = shouldProcessAudio
+                ? "⚠️ Recebi seu áudio, mas não consegui processar agora. Tente novamente em alguns segundos ou envie o comando em texto para eu confirmar execução/não execução."
+                : "⚠️ Recebi sua mensagem, mas não consegui processar agora. Tente novamente em alguns segundos.";
+
+              await sendWhatsApp(uazapiUrl, uazapiToken, phone, fallbackMessage);
+            }
+          }
+        })
+        .catch(async (err) => {
+          console.error("Process-audio request failed:", err);
+          await auditUnrecognized("process_audio_exception", {
+            error: String(err?.message || err),
+            should_process_audio: shouldProcessAudio,
+            should_process_text: shouldProcessText,
+          }, phone);
+        });
+
+      const edgeRuntime = (globalThis as any).EdgeRuntime;
+      if (edgeRuntime?.waitUntil) {
+        edgeRuntime.waitUntil(processPromise);
+      } else {
+        await processPromise;
       }
 
-      return new Response(JSON.stringify({ success: processRes.ok, result }), {
+      return new Response(JSON.stringify({ success: true, queued: true }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
+
+    await auditUnrecognized("unrecognized_unsupported_message", {
+      message_type: messageType,
+      has_audio_url: !!audioUrl,
+      has_text_content: hasTextContent,
+      selected_source: selectedCandidate?.source || null,
+    }, phone);
 
     return new Response(JSON.stringify({ success: true, message: "Message received" }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
