@@ -676,7 +676,7 @@ Sempre responda APENAS com o JSON, sem markdown.`;
 
     if (interpretedAction.action === "register_device") {
       const normalizedCondicao = normalizeDeviceCondition(interpretedAction.condicao, combinedTranscription);
-      interpretedAction.condicao = normalizedCondicao || interpretedAction.condicao;
+      interpretedAction.condicao = normalizedCondicao;
 
       const missingFields = requiredFieldsByAction.register_device.filter((field) => !isFieldPresent(interpretedAction[field]));
       if (missingFields.length > 0) {
