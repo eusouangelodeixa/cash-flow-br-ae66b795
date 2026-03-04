@@ -181,6 +181,36 @@ export type Database = {
         }
         Relationships: []
       }
+      whatsapp_audit_events: {
+        Row: {
+          created_at: string
+          details: Json
+          event: string
+          id: string
+          payload: Json
+          phone: string | null
+          reason: string
+        }
+        Insert: {
+          created_at?: string
+          details?: Json
+          event?: string
+          id?: string
+          payload?: Json
+          phone?: string | null
+          reason: string
+        }
+        Update: {
+          created_at?: string
+          details?: Json
+          event?: string
+          id?: string
+          payload?: Json
+          phone?: string | null
+          reason?: string
+        }
+        Relationships: []
+      }
       whatsapp_messages: {
         Row: {
           action_result: Json | null
