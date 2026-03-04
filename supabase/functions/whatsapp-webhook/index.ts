@@ -115,7 +115,7 @@ serve(async (req) => {
     const { data: pendingVerification } = await supabase
       .from("whatsapp_verifications")
       .select("*")
-      .in("phone", phoneVariants)
+      .in("phone", phoneVariantsArray)
       .eq("verified", false)
       .gt("expires_at", new Date().toISOString())
       .order("created_at", { ascending: false })
