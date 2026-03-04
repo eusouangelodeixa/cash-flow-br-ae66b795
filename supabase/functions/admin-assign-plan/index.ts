@@ -12,25 +12,35 @@ serve(async (req) => {
   }
 
   try {
-    const { customer_id, price_id, cancel_after_days } = await req.json();
+    const { customer_id, price_id, trial_days } = await req.json();
     
     const stripe = new Stripe(Deno.env.get("STRIPE_SECRET_KEY") || "", {
       apiVersion: "2025-08-27.basil",
     });
 
+    // Cancel the incomplete subscription if any
+    const existing = await stripe.subscriptions.list({ customer: customer_id, status: "incomplete", limit: 10 });
+    for (const sub of existing.data) {
+      await stripe.subscriptions.cancel(sub.id);
+    }
+
     const subscription = await stripe.subscriptions.create({
       customer: customer_id,
       items: [{ price: price_id }],
-      cancel_at: cancel_after_days 
-        ? Math.floor(Date.now() / 1000) + (cancel_after_days * 86400)
-        : undefined,
-      payment_settings: {
-        payment_method_types: ["card"],
+      trial_period_days: trial_days || 30,
+      trial_settings: {
+        end_behavior: { missing_payment_method: "cancel" },
       },
-      payment_behavior: "default_incomplete",
+      payment_settings: {
+        save_default_payment_method: "on_subscription",
+      },
     });
 
-    return new Response(JSON.stringify({ subscription_id: subscription.id, status: subscription.status }), {
+    return new Response(JSON.stringify({ 
+      subscription_id: subscription.id, 
+      status: subscription.status,
+      trial_end: subscription.trial_end 
+    }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (error) {
