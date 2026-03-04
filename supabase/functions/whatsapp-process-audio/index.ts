@@ -646,15 +646,15 @@ Sempre responda APENAS com o JSON, sem markdown.`;
 
       if (recalculatedMissing.length === 0) {
         interpretedAction = {
-          action: "register_device",
           ...repaired,
+          action: "register_device",
         };
       } else {
         interpretedAction = {
+          ...repaired,
           action: "need_info",
           partial_action: "register_device",
           missing_fields: recalculatedMissing,
-          ...repaired,
         };
       }
 
