@@ -799,14 +799,12 @@ Sempre responda APENAS com o JSON, sem markdown.`;
         }
       }
     } else if (interpretedAction.action === "need_info") {
-      const partialAction = interpretedAction.partial_action || "register_sale";
-      const missingFields = Array.isArray(interpretedAction.missing_fields) && interpretedAction.missing_fields.length > 0
-        ? interpretedAction.missing_fields
-        : requiredFieldsByAction[partialAction] || ["modelo"];
+      const partialAction = interpretedAction.partial_action || pendingContext?.partial_action || "register_sale";
+      const requiredFields = requiredFieldsByAction[partialAction] || ["modelo"];
 
       // Merge any data GPT already extracted
       const collectedData: Record<string, any> = {};
-      const allFields = [...(requiredFieldsByAction[partialAction] || []), "device_id", "modelo", "capacidade", "cor", "condicao", "preco_custo", "preco_venda", "cliente"];
+      const allFields = [...requiredFields, "device_id", "modelo", "capacidade", "cor", "condicao", "preco_custo", "preco_venda", "cliente"];
       for (const f of allFields) {
         if (isFieldPresent(interpretedAction[f])) collectedData[f] = interpretedAction[f];
       }
@@ -815,6 +813,16 @@ Sempre responda APENAS com o JSON, sem markdown.`;
         for (const [k, v] of Object.entries(pendingContext.collected_data)) {
           if (!collectedData[k] && isFieldPresent(v)) collectedData[k] = v;
         }
+      }
+
+      let missingFields = Array.isArray(interpretedAction.missing_fields) && interpretedAction.missing_fields.length > 0
+        ? interpretedAction.missing_fields
+        : requiredFields;
+
+      if (partialAction === "register_device") {
+        const repaired = coerceRegisterDevicePayload(collectedData, pendingContext, combinedTranscription);
+        Object.assign(collectedData, repaired);
+        missingFields = requiredFieldsByAction.register_device.filter((field) => !isFieldPresent(collectedData[field]));
       }
 
       const need = buildAllQuestionsMessage(partialAction, missingFields, collectedData, combinedTranscription);
