@@ -170,7 +170,7 @@ serve(async (req) => {
     const messageType = (data?.messageType || body?.messageType || "").toLowerCase();
     const isAudio = messageType === "audiomessage" || messageType === "audio" ||
                     data?.type === "audio" || data?.mimetype?.includes("audio") ||
-                    !!data?.audioMessage;
+                    !!data?.audioMessage || !!data?.message?.audioMessage || !!body?.message?.audioMessage;
 
     const isText = messageType === "extendedtextmessage" || messageType === "conversation" ||
                    data?.type === "text" || data?.type === "chat" ||
